@@ -1,108 +1,139 @@
 // SPDX-License-Identifier: MIT
 pragma solidity  ^0.8;
 
+/// @title Auction contract for one article
+/// @author Hiskander Aguillon
+/// @notice This contract implements a secure auction with bid management and partial refunds
+/// @dev Includes bid extensions, 2% commission, and event logging
+/// @dev For quick deploy test use 120,1000000000000000000 and change EXTENSION_TIME to 120
+/// @dev For Test - Times
+            // 1 hour - 3600
+            // 1 day - 86400
+            // 1 week - 604800
+/// @dev When auction is closed, use showWinner to emit final result
+
 contract Auction {
+    // Minimum entry bid
+    uint256 public entryBid = 1000000000000000000; 
 
-    // VARIABLES DE ESTADO: 
+    /// @notice Address of the current highest bidder
+    address public highestBidder;
 
-    // Sobre Bids COMPLETADAS
-    uint256 entryBid = 1; // Bid minimo de entrada a la subasta
-    address public highestBidder; // Address de la wallet del buyer con mayor bid
-    uint256 public highestBid; // Monto del mayor bid
+    /// @notice Value of the highest bid submitted
+    uint256 public highestBid;
 
-    address seller = 0x742d35Cc6634C0532925a3b844Bc454e4438f44e; // Un vendedor
-
-    // Debe ser muchos vendedores
+    /// @notice Seller's wallet address
+    address public seller;
+    address private developer;
+    bool private sellerPaid = false;
+    
     struct Buyer {
-        uint256 totalBid;
-        bool claimed;
-        // Agregar mas campos
+        string nombre;
+        uint256 totalBid;          ///< Total deposited by the buyer
+        uint256 lastValidBid;      ///< Last valid bid counted in the auction
+        bool claimed;              ///< Whether the user has claimed refund or not
+        bool productClaimed;        ///< Whether the user is winner and claimed the product
     }
-    mapping(address => Buyer) public buyers;
 
-    address[] public buyerAddresses; // Esto es un array o un bytes?
+    /// @notice Mapping of buyers by address
+    mapping(address => Buyer) private buyers;
 
-    // Duración de la Subasta => COMPLETADO
-    uint256 startAuctionTimestamp; // Tiempo para iniciar la subasta
-    uint256 public auctionEndTime; // 1 hora o 3600 segundos o ajustar
-    uint256 constant EXTENSION_TIME = 600; // 10 minutos en segundos
+    /// @notice List of all bidder addresses
+    address[] private buyerAddresses; 
 
-    // Caja de seguridad para los depositos de los bid's.
-    uint256 safeBox = 0; 
+    /// @notice Timestamp when the auction started
+    uint256 private startAuctionTimestamp;
+
+    /// @notice Timestamp when the auction ends
+    uint256 public auctionEndTime;
+
+    /// @notice Duration added when bids are placed in the last 10 minutes
+    uint256 constant EXTENSION_TIME = 600;
+
+    /// @notice Tracks whether the winner was already announced
+    bool public winnerAnnounced = false;
+
+    /// @notice Accumulated commission from refunds (2%)
+    uint256 private safeBox = 0;
 
 
-    //FUNCIONES:
-    // Constructor. Inicializa la subasta con los parámetros necesario para su funcionamiento.
+    /// @notice Initializes the auction parameters
+    /// @param _duration Duration of the auction in seconds
+    /// @param _entryBid Minimum bid to enter the auction
     constructor (uint256 _duration, uint256 _entryBid) {
-        // TODO: Definir tus valores iniciales de la subasta.
-        require(_entryBid >= entryBid, 'El monto es muy bajo'); // Verifica el minimo del bid
-        entryBid = _entryBid; // sobreescribe el valor de entryBid
 
-        startAuctionTimestamp = block.timestamp; // Inicia el tiempo de la Subasta
-        auctionEndTime = block.timestamp + _duration; // Paso la duracion de la subasta, pero como hago en caso de bid-extras?
+        require(_entryBid >= entryBid, "Bid too low"); ///< Check min bid
+        entryBid = _entryBid; 
+        seller = msg.sender; ///< Address who deployed is the seller
+        developer = msg.sender; ///< Developer and Seller are the same for now
+        startAuctionTimestamp = block.timestamp; ///< Start auction time
+        auctionEndTime = block.timestamp + _duration; ///< Define auction duration
+
     }
 
-    // === FUNCIONES ADICIONALES ===
-    function hasAuctionClosed () public view returns (bool) {
-        // Como agregar el tiempo de duracion de la Subasta?
-        return block.timestamp >= startAuctionTimestamp + auctionEndTime;
+    /// @notice Returns the remaining time for the auction
+    /// @return Seconds remaining until the auction ends
+    function getTimeRemaining() public view returns (uint256) {
+        if (block.timestamp >= auctionEndTime) {
+            return 0;
+        } else {
+            return auctionEndTime - block.timestamp;
+        }
     }
 
-    // Modificadores
-    modifier whileAuctionOpen () {
-        // Asegurar que algunas funciones solo se ejecuten durante el tiempo de subasta
-        require(block.timestamp <  startAuctionTimestamp + auctionEndTime, "Subasta cerrada");
-        _;
-    }
+    /// @notice Allows a participant to place a bid
+    /// @dev Requires 5% increment over highest bid and may extend time
+    function setBid( ) external payable whileAuctionOpen {
 
-    modifier whenAuctionClosed () {
-        // Asegurar que algunas funciones solo cuando la subasta finalizo
-        require(block.timestamp >=  startAuctionTimestamp + auctionEndTime, "Subasta activa");
-        _;
-    }
+        // Checking the seller can't set a Bid
+        require(msg.sender != seller, "Seller cannot bid");
+        require(msg.value > 0, "Must send ETH to bid");
 
-    // === FUNCION PARA OFERTAR ===
-    // Función para ofertar: Permite a los participantes ofertar por el artículo.
-    // Para que una oferta sea válida debe ser mayor que la mayor oferta actual al menos en 5% y
-    // debe realizarse mientras la subasta esté activa.
-    function setBid( ) public payable whileAuctionOpen {
-        // TODO: Agregar la logica para la oferta
-
-        uint256 newBid = msg.value; 
-        require(newBid >= entryBid, "Debes ofertar al menos el minimo de entrada"); // Idealmente seria el primer Bid ?
-        require(newBid >= highestBid + (highestBid * 5) /100, "Debes superar la mejor oferta en al menos 5%" );
-
+        uint256 newDeposit = msg.value;
         Buyer storage buyer = buyers[msg.sender];
 
-        // Reembolsar la oferta anterior del mejor postor (más adelante podés permitir retirarlo manualmente)
+        // New Bidder
         if (buyer.totalBid == 0) {
             buyerAddresses.push(msg.sender);
         }
-
-        buyer.totalBid += newBid;
-        highestBidder = msg.sender;
-        highestBid = buyer.totalBid;
-
+        buyer.totalBid += newDeposit;
         
-         // Si quedan 10 minutos o menos para que termine la subasta
+        // Find the Last Valid Bid
+        uint256 proposedBid = newDeposit;
+        uint256 minRequired = highestBid == 0 ? entryBid : highestBid + (highestBid * 5) / 100;
+
+        require(proposedBid >= minRequired, "Bid must exceed highest by 5%");
+
+        // Update the Last Valid Bid
+        buyer.lastValidBid = proposedBid;
+        highestBid = proposedBid;
+        highestBidder = msg.sender;
+
+        // Auction time extension  of 10 minutes
         if (auctionEndTime - block.timestamp <= EXTENSION_TIME) {
             auctionEndTime = block.timestamp + EXTENSION_TIME;
+            emit AuctionExtended(auctionEndTime);
         }
-         
-        // Emitir evento, es como invocarlo
+
         emit NewBidEvent(msg.sender, buyer.totalBid);
+        emit DebugLog("New highestBidder", highestBidder, highestBid);
+
     }
 
-    // === FUNCION MOSTRAR GANADOR ===
-    // Mostrar ganador: Muestra el ofertante ganador y el valor de la oferta ganadora.
-    function showWinner () public whenAuctionClosed {
-        // Logica para mostrar el buyer, primero resolver los mapping bids y buyers
-    }
+    /// @notice Displays the winner of the auction after it ends
+    function showWinner () external whenAuctionClosed {
+        require(!winnerAnnounced, "Winner already announced");
 
-    // === FUNCION MOSTRAR OFERTAS ===
-    // Mostrar ofertas: Muestra la lista de ofertantes y los montos ofrecidos.
+        emit WinnerAnnounced(highestBidder, highestBid);
+        winnerAnnounced = true;
+
+        emit AuctionFinished(highestBidder, highestBid);
+
+    }
+  
+    /// @notice Returns a list of all bidders and their total bid amounts
+    /// @return Array of bidder addresses and their bid values
     function showAllBids () public view whileAuctionOpen returns(address[] memory, uint256[] memory) {
-        // Logica para mostrar las ofertas y sus ofertantes
         uint256[] memory amounts = new uint256[](buyerAddresses.length);
         for (uint i = 0; i < buyerAddresses.length; i++) {
             amounts[i] = buyers[buyerAddresses[i]].totalBid;
@@ -110,36 +141,149 @@ contract Auction {
         return (buyerAddresses, amounts);
     }
 
-    // === FUNCION DEVOLVER DEPOSITOS ===
-    // Devolver depósitos: Al finalizar la subasta se devuelve el depósito a los ofertantes que 
-    //no ganaron, descontando una comisión del 2% para el gas.
-    function claimDeposit () public whenAuctionClosed {}
+    /// @notice Allows losing bidders to claim their deposit after auction ends
+    /// @dev Refund is 98% of the total bid (2% commission retained)
+    function claimDeposit () external whenAuctionClosed {
+        Buyer storage buyer = buyers[msg.sender];                               // Getting buyer
+        require(msg.sender != highestBidder, "Winner cannot claim deposit");    // Revert if winner try to calimDeposit
+        require(buyer.totalBid > 0, "No deposit to claim");
+        require(!buyer.claimed, "Deposit already claimed");                     // Checking the reclaimer
 
-    // MANEJO DE DEPOSITOS:
-    // Las ofertas se depositan en el contrato y se almacenan con las direcciones de los ofertantes.
-    function handlerDeposit () public {}
+        uint256 refundAmount = (buyer.totalBid * 98) / 100;                     // Calculate 2%
+        buyer.claimed = true;                                                   // Mark as Claimed
+        payable(msg.sender).transfer(refundAmount);                             // Send refundAmount to claimer
 
-    // EVENTOS:
-    // Nueva Oferta: Se emite cuando se realiza una nueva oferta.
+        uint256 commission = buyer.totalBid - refundAmount;                     // Add comission in safebox
+        safeBox += commission;
+    }
+
+    /// @notice Allows participants to claim their excess funds during the auction without commission
+    /// @dev Excess is the portion of total bid not used in last valid bid
+    function partialClaim () external whileAuctionOpen {
+        Buyer storage buyer = buyers[msg.sender];                               // Getting buyer
+        require(buyer.totalBid > 0, "No funds to claim");                       // Checking if buyer have funds to claim
+        
+        uint256 excessAmount;                                                    
+
+        if (msg.sender == highestBidder) {
+            require(buyer.totalBid >= buyer.lastValidBid, "Cannot affect winning bid");
+            require(buyer.lastValidBid == highestBid,"Mismatch with highestBid");
+
+            excessAmount = buyer.totalBid - buyer.lastValidBid;                     // Calculate excessAmount
+            require(excessAmount > 0, "No withdrawable excess");                    // Checking excessAmount
+
+            buyer.totalBid -= excessAmount;
+
+        } else {
+            excessAmount = buyer.totalBid;
+            buyer.totalBid = 0;
+            buyer.lastValidBid = 0;
+        }
+
+        payable(msg.sender).transfer(excessAmount);                             // Transfer to buyer
+
+        emit PartialClaimEvent(msg.sender, excessAmount);
+        emit DebugClaim(msg.sender, buyer.totalBid, buyer.lastValidBid, highestBidder, highestBid);
+
+    }
+
+    /// @notice Allows to winner to claim their product after auction ends
+    function claimProduct () external whenAuctionClosed {
+        require(msg.sender != seller, "Seller cannot claim the product");           // Prevent seller
+        require(msg.sender == highestBidder, "Only winner can claim product");      // Ensure only winner
+
+        Buyer storage buyer = buyers[msg.sender];
+        require(!buyer.productClaimed, "Product already claimed");                  // Avoid double claim
+
+        buyer.productClaimed = true;
+
+        emit ProductClaimed(msg.sender);
+    }
+
+    /// @notice Allows the developer to withdraw accumulated commissions
+    function withdrawSafeBox() external whenAuctionClosed {
+        require(msg.sender == developer, "Only developer can withdraw commissions");
+        require(safeBox > 0, "No funds to withdraw"); // Protect empty transfer.
+
+        uint256 amount = safeBox;
+        safeBox = 0; // Protect reentrancy before transfer.
+        payable(msg.sender).transfer(amount); // Send amount to seller.
+
+    }
+
+    /// @notice Allows the seller to withdraw the value of the sold product.
+    function withdrawSellerFunds() external whenAuctionClosed {
+        require(msg.sender == seller, "Only seller can withdraw");
+        require(!sellerPaid, "Funds already withdrawn by seller");
+        require(highestBid > 0, "No winning bid");
+
+        uint256 payout = (highestBid * 98) / 100;
+        sellerPaid = true;
+        payable(seller).transfer(payout);
+
+        uint256 commission = highestBid - payout;
+        safeBox += commission;
+
+    }
+
+    /// @notice Allows get buyer info.
+    function getBuyerInfo(address user) external view returns (
+        string memory, uint256, uint256, bool, bool
+    ) {
+        Buyer memory b = buyers[user];
+        return (b.nombre, b.totalBid, b.lastValidBid, b.claimed, b.productClaimed);
+    }
+
+    /// @notice Allows get Buyer address
+    function getBuyerAddresses() external view returns (address[] memory) {
+        return buyerAddresses;
+    }
+
+    /// @notice Ensures the function can only be called while the auction is open
+    /// @dev Reverts if current block timestamp is after the auction end time
+    modifier whileAuctionOpen () {
+        require(block.timestamp < auctionEndTime, "Auction is Closed");
+        _;
+    }
+
+    /// @notice Ensures the function can only be called after the auction has ended
+    /// @dev Reverts if the auction is still active
+    modifier whenAuctionClosed () {
+        require(block.timestamp >= auctionEndTime, "Auction is still active");
+        _;
+    }
+
+    /// @notice Emitted when a new valid bid is placed
+    /// @param bidder Address of the bidder
+    /// @param amount Total bid amount by the bidder
     event NewBidEvent (address indexed bidder, uint256 amount);
 
-    // Subasta Finalizada: Se emite cuando finaliza la subasta.
-    event AuctionFinished ();
+    /// @notice Emitted when the auction ends
+    /// @param winner Address of the winning bidder
+    /// @param amount Amount of the winning bid
+    event AuctionFinished(address winner, uint256 amount);
 
-    // FUNCIONALIDADES AVANZADAS:
-    // Reembolso parcial:
-    // Los participantes pueden retirar de su depósito el importe por encima de su última oferta 
-    // durante el desarrollo de la subasta.
+    /// @notice Emitted when the winner is officially announced
+    /// @param winner Address of the winning bidder
+    /// @param amount Final highest bid
+    event WinnerAnnounced(address winner, uint256 amount);
 
-    function partialClaim () public whileAuctionOpen {}
+    /// @notice Emitted when a partial refund is claimed
+    /// @param user Address of the claimant
+    /// @param amount Amount refunded
+    event PartialClaimEvent(address indexed user, uint256 amount);
 
-    // Consideraciones adicionales:
-    /* 
-    - Se debe utilizar modificadores cuando sea conveniente.
-    - Para superar a la mejor oferta la nueva oferta debe ser superior al menos en 5%.
-    - El plazo de la subasta se extiende en 10 minutos con cada nueva oferta válida. Esta regla aplica siempre a partir de 10 minutos antes del plazo original de la subasta. De esta manera los competidores tienen suficiente tiempo para presentar una nueva oferta si así lo desean.
-    - El contrato debe ser seguro y robusto, manejando adecuadamente los errores y las posibles situaciones excepcionales.
-    - Se deben utilizar eventos para comunicar los cambios de estado de la subasta a los participantes.
-    - La documentación del contrato debe ser clara y completa, explicando las funciones, variables y eventos.
-    */
+    /// @notice Emitted when auction time is extended
+    /// @param newEndTime New end time of the auction
+    event AuctionExtended(uint256 newEndTime);
+
+    /// @notice Emitted when the product is claimed
+    // @param address Final highest bid
+    event ProductClaimed(address winner);
+
+    /// @dev Debug log for internal testing
+    event DebugLog(string mensaje, address bidder, uint256 bid);
+
+    /// @dev Debug log for claim information
+    event DebugClaim(address claimant, uint256 totalBid, uint256 lastValidBid, address highestBidder, uint256 highestBid);
 }
