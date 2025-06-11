@@ -86,8 +86,8 @@ contract Auction {
     function setBid( ) external payable whileAuctionOpen {
 
         // Checking the seller can't set a Bid
-        require(msg.sender != seller, "Seller cannot bid");
-        require(msg.value > 0, "Must send ETH to bid");
+        require(msg.sender != seller, "Seller not allowed");
+        require(msg.value > 0, "Zero ETH");
 
         uint256 newDeposit = msg.value;
         Buyer storage buyer = buyers[msg.sender];
@@ -102,7 +102,7 @@ contract Auction {
         uint256 proposedBid = newDeposit;
         uint256 minRequired = highestBid == 0 ? entryBid : highestBid + (highestBid * 5) / 100;
 
-        require(proposedBid >= minRequired, "Bid must exceed highest by 5%");
+        require(proposedBid >= minRequired, "Min +5% req");
 
         // Update the Last Valid Bid
         buyer.lastValidBid = proposedBid;
@@ -122,7 +122,7 @@ contract Auction {
 
     /// @notice Displays the winner of the auction after it ends
     function showWinner () external whenAuctionClosed {
-        require(!winnerAnnounced, "Winner already announced");
+        require(!winnerAnnounced, "Winner Announced");
 
         emit WinnerAnnounced(highestBidder, highestBid);
         winnerAnnounced = true;
@@ -134,43 +134,68 @@ contract Auction {
     /// @notice Returns a list of all bidders and their total bid amounts
     /// @return Array of bidder addresses and their bid values
     function showAllBids () public view whileAuctionOpen returns(address[] memory, uint256[] memory) {
-        uint256[] memory amounts = new uint256[](buyerAddresses.length);
-        for (uint i = 0; i < buyerAddresses.length; i++) {
-            amounts[i] = buyers[buyerAddresses[i]].totalBid;
+        uint256 buyerAddresseslength = buyerAddresses.length;
+        uint256[] memory amounts = new uint256[](buyerAddresseslength);
+        address addr;
+        Buyer memory b;
+
+        for (uint i = 0; i < buyerAddresseslength; i++) {
+            addr = buyerAddresses[i];
+            b = buyers[addr];
+
+            amounts[i] = b.totalBid;
         }
         return (buyerAddresses, amounts);
     }
 
-    /// @notice Allows losing bidders to claim their deposit after auction ends
-    /// @dev Refund is 98% of the total bid (2% commission retained)
-    function claimDeposit () external whenAuctionClosed {
-        Buyer storage buyer = buyers[msg.sender];                               // Getting buyer
-        require(msg.sender != highestBidder, "Winner cannot claim deposit");    // Revert if winner try to calimDeposit
-        require(buyer.totalBid > 0, "No deposit to claim");
-        require(!buyer.claimed, "Deposit already claimed");                     // Checking the reclaimer
+    /// @notice Distributes refunds to all non-winning bidders using a loop
+    /// @dev Only callable after auction ends. Prevents reentrancy and double refunds.
+    function distributeRefunds() external whenAuctionClosed {
+        require(msg.sender == seller, "Not authorized");
 
-        uint256 refundAmount = (buyer.totalBid * 98) / 100;                     // Calculate 2%
-        buyer.claimed = true;                                                   // Mark as Claimed
-        payable(msg.sender).transfer(refundAmount);                             // Send refundAmount to claimer
+        address current;
+        Buyer storage buyer;
+        uint256 len = buyerAddresses.length;
+        uint256 refund;
+        uint256 commission;
 
-        uint256 commission = buyer.totalBid - refundAmount;                     // Add comission in safebox
-        safeBox += commission;
+        for (uint256 i = 0; i < len; i++) {
+            current = buyerAddresses[i];
+            if (current == highestBidder) {
+                continue; // Skip winner
+            }
+
+            buyer = buyers[current];
+
+            if (buyer.totalBid == 0 || buyer.claimed) {
+                continue; // Already claimed or no deposit
+            }
+
+            refund = (buyer.totalBid * 98) / 100;
+            commission = buyer.totalBid - refund;
+
+            buyer.claimed = true; // Mark claimed before sending
+            safeBox += commission; // Add 2% commission
+            payable(current).transfer(refund);
+        }
     }
+
+
 
     /// @notice Allows participants to claim their excess funds during the auction without commission
     /// @dev Excess is the portion of total bid not used in last valid bid
     function partialClaim () external whileAuctionOpen {
         Buyer storage buyer = buyers[msg.sender];                               // Getting buyer
-        require(buyer.totalBid > 0, "No funds to claim");                       // Checking if buyer have funds to claim
+        require(buyer.totalBid > 0, "No funds");                       // Checking if buyer have funds to claim
         
         uint256 excessAmount;                                                    
 
         if (msg.sender == highestBidder) {
-            require(buyer.totalBid >= buyer.lastValidBid, "Cannot affect winning bid");
-            require(buyer.lastValidBid == highestBid,"Mismatch with highestBid");
+            require(buyer.totalBid >= buyer.lastValidBid, "Affects winBid");
+            require(buyer.lastValidBid == highestBid,"Mismatch win");
 
             excessAmount = buyer.totalBid - buyer.lastValidBid;                     // Calculate excessAmount
-            require(excessAmount > 0, "No withdrawable excess");                    // Checking excessAmount
+            require(excessAmount > 0, "No excess");                    // Checking excessAmount
 
             buyer.totalBid -= excessAmount;
 
@@ -189,11 +214,11 @@ contract Auction {
 
     /// @notice Allows to winner to claim their product after auction ends
     function claimProduct () external whenAuctionClosed {
-        require(msg.sender != seller, "Seller cannot claim the product");           // Prevent seller
-        require(msg.sender == highestBidder, "Only winner can claim product");      // Ensure only winner
+        require(msg.sender != seller, "Seller excluded");           // Prevent seller
+        require(msg.sender == highestBidder, "Only winner");      // Ensure only winner
 
         Buyer storage buyer = buyers[msg.sender];
-        require(!buyer.productClaimed, "Product already claimed");                  // Avoid double claim
+        require(!buyer.productClaimed, "Already claimed");                  // Avoid double claim
 
         buyer.productClaimed = true;
 
@@ -202,8 +227,8 @@ contract Auction {
 
     /// @notice Allows the developer to withdraw accumulated commissions
     function withdrawSafeBox() external whenAuctionClosed {
-        require(msg.sender == developer, "Only developer can withdraw commissions");
-        require(safeBox > 0, "No funds to withdraw"); // Protect empty transfer.
+        require(msg.sender == developer, "Only dev");
+        require(safeBox > 0, "Empty safeBox"); // Protect empty transfer.
 
         uint256 amount = safeBox;
         safeBox = 0; // Protect reentrancy before transfer.
@@ -213,9 +238,9 @@ contract Auction {
 
     /// @notice Allows the seller to withdraw the value of the sold product.
     function withdrawSellerFunds() external whenAuctionClosed {
-        require(msg.sender == seller, "Only seller can withdraw");
-        require(!sellerPaid, "Funds already withdrawn by seller");
-        require(highestBid > 0, "No winning bid");
+        require(msg.sender == seller, "Only seller");
+        require(!sellerPaid, "Already paid");
+        require(highestBid > 0, "No winner");
 
         uint256 payout = (highestBid * 98) / 100;
         sellerPaid = true;
@@ -239,17 +264,44 @@ contract Auction {
         return buyerAddresses;
     }
 
+/// @notice Allows the developer to withdraw residual ETH after a grace period
+/// @dev Only executable if all non-winners claimed and 7 days have passed
+function emergencyWithdraw() external whenAuctionClosed {
+    require(msg.sender == developer, "Only developer can withdraw");
+    require(block.timestamp >= auctionEndTime + 7 days, "Wait 7 days after auction");
+
+    // Ensure all non-winners have claimed their refunds
+    for (uint i = 0; i < buyerAddresses.length; i++) {
+        address buyerAddr = buyerAddresses[i];
+        if (buyerAddr != highestBidder) {
+            Buyer memory b = buyers[buyerAddr];
+            require(b.claimed, "All non-winners must claim");
+        }
+    }
+
+    // Optional: check if seller was already paid
+    require(sellerPaid, "Seller must be paid");
+
+    // Transfer any residual ETH to developer
+    uint256 balance = address(this).balance;
+    require(balance > 0, "No ETH to withdraw");
+    payable(developer).transfer(balance);
+
+    emit EmergencyWithdraw(developer, balance);
+}
+
+
     /// @notice Ensures the function can only be called while the auction is open
     /// @dev Reverts if current block timestamp is after the auction end time
     modifier whileAuctionOpen () {
-        require(block.timestamp < auctionEndTime, "Auction is Closed");
+        require(block.timestamp < auctionEndTime, "Closed");
         _;
     }
 
     /// @notice Ensures the function can only be called after the auction has ended
     /// @dev Reverts if the auction is still active
     modifier whenAuctionClosed () {
-        require(block.timestamp >= auctionEndTime, "Auction is still active");
+        require(block.timestamp >= auctionEndTime, "Still active");
         _;
     }
 
@@ -286,4 +338,9 @@ contract Auction {
 
     /// @dev Debug log for claim information
     event DebugClaim(address claimant, uint256 totalBid, uint256 lastValidBid, address highestBidder, uint256 highestBid);
+
+    /// @notice Emitted when the developer performs an emergency withdrawal
+    /// @param developer Address who performed the withdrawal
+    /// @param amount Amount of ETH recovered
+    event EmergencyWithdraw(address developer, uint256 amount);
 }
