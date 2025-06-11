@@ -48,7 +48,7 @@ Example (for testing):
     _duration: 120 (seconds)
 
     _entryBid: 1 ETH → 1000000000000000000
-
+```
 🚀 Deployment
 
 You can deploy the contract using Remix, Hardhat, or Foundry.
@@ -67,7 +67,7 @@ Remix (Quick Test)
         The deploying address initially acts as both seller and developer.
 
     ⚠️ Ensure the deploying account is trusted, as it will control both withdrawals.
-```
+
 🧠 Core Functions
 Function	Description
 setBid()	Place a new bid ≥ 5% higher than current highest bid.
