@@ -36,7 +36,6 @@ This smart contract enables a seller to host a time-bound auction where multiple
 
 ## ⚙️ Constructor Parameters
 
-### Signature:
 ```solidity
 constructor(uint256 _duration, uint256 _entryBid)
 
@@ -68,7 +67,7 @@ Remix (Quick Test)
         The deploying address initially acts as both seller and developer.
 
     ⚠️ Ensure the deploying account is trusted, as it will control both withdrawals.
-
+```
 🧠 Core Functions
 Function	Description
 setBid()	Place a new bid ≥ 5% higher than current highest bid.
